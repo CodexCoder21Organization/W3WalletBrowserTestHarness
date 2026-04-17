@@ -1,5 +1,5 @@
 @KotlinBuildScript("https://tools.kotlin.build/")
-@file:WithArtifact("kompile:build-kotlin-jvm:0.0.2")
+@file:WithArtifact("kompile:build-kotlin-jvm:0.0.1")
 package w3wallet.browser.testharness
 
 import build.kotlin.withartifact.WithArtifact
@@ -17,7 +17,7 @@ val dependencies = resolveDependencies(
 @MavenArtifactCoordinates("w3wallet.browser.testharness:W3WalletBrowserTestHarness:")
 fun buildMaven(): File {
     return buildSimpleKotlinMavenArtifact(
-        coordinates = "w3wallet.browser.testharness:W3WalletBrowserTestHarness:0.0.2",
+        coordinates = "w3wallet.browser.testharness:W3WalletBrowserTestHarness:0.0.3",
         src = File("src"),
         compileDependencies = dependencies,
     )
