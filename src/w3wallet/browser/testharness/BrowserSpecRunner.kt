@@ -148,9 +148,54 @@ object BrowserSpecRunner {
         val demoJar = System.getenv("DEMO_JAR")?.let { File(it) }
             ?.takeIf { it.isFile }
             ?: buildDemoJar(repoRoot)
-        val daemonClasspath = fetchDaemonClasspath()
-        val extensionDistDir = fetchExtensionDist(repoRoot)
+        val coursier = ensureCoursier(repoRoot)
+        val daemonClasspath = fetchDaemonClasspath(repoRoot, coursier)
+        val extensionDistDir = fetchExtensionDist(repoRoot, coursier)
         return ResolvedDeps(repoRoot, demoJar, daemonClasspath, extensionDistDir)
+    }
+
+    /**
+     * Return the absolute path of a usable `coursier` binary, downloading one
+     * into the harness cache when neither `$PATH` nor the consumer's
+     * `jars/coursier` has it. kompile test JVMs on the kotlin.build droplet
+     * don't inherit the outer shell's PATH, so we cannot rely on the system
+     * install that the droplet image provides; making the harness
+     * self-sufficient removes an entire class of "works on one env, not the
+     * other" flakes.
+     */
+    private fun ensureCoursier(repoRoot: File): String {
+        val onPath = runCommand(
+            listOf("sh", "-c", "command -v coursier"),
+            cwd = File("."),
+            captureOutput = true,
+            failOnNonZero = false,
+        )
+        if (onPath.exitCode == 0) {
+            val path = onPath.stdout.trim()
+            if (path.isNotEmpty() && File(path).canExecute()) {
+                println("[harness] Using coursier from PATH: $path")
+                return path
+            }
+        }
+        val consumerLocal = File(repoRoot, "jars/coursier")
+        if (consumerLocal.canExecute()) {
+            println("[harness] Using coursier from consumer jars/: $consumerLocal")
+            return consumerLocal.absolutePath
+        }
+        val cached = File(repoRoot, ".harness-cache/coursier")
+        if (!cached.canExecute()) {
+            println("[harness] Downloading coursier into $cached")
+            cached.parentFile.mkdirs()
+            runCommand(
+                listOf(
+                    "curl", "-fLo", cached.absolutePath,
+                    "https://github.com/coursier/launchers/raw/master/coursier",
+                ),
+                cwd = File("."),
+            )
+            cached.setExecutable(true)
+        }
+        return cached.absolutePath
     }
 
     private fun buildDemoJar(repoRoot: File): File {
@@ -171,12 +216,24 @@ object BrowserSpecRunner {
             ?: error("demo fat JAR not found under $libs after gradle fatJar")
     }
 
-    private fun fetchDaemonClasspath(): String {
-        // Cached between tests in the same run by coursier itself.
+    private fun fetchDaemonClasspath(repoRoot: File, coursier: String): String {
+        // Persist the resolved classpath string across per-test JVMs so
+        // only the first test pays for the cold-cache `coursier fetch`
+        // (which can take 5+ minutes the first time it downloads jvm-libp2p,
+        // netty, bouncycastle, etc. on a fresh droplet).
+        val cacheFile = File(repoRoot, ".harness-cache/daemon-classpath.txt")
+        if (cacheFile.isFile) {
+            val cached = cacheFile.readText().trim()
+            if (cached.isNotEmpty() && cached.split(':').all { File(it).isFile }) {
+                println("[harness] Reusing cached daemon classpath ($cacheFile)")
+                return cached
+            }
+            println("[harness] Stale daemon-classpath cache; refetching")
+        }
         println("[harness] Resolving $DAEMON_COORDINATES classpath via coursier")
         val result = runCommand(
             listOf(
-                "coursier", "fetch",
+                coursier, "fetch",
                 "-r", KOTLIN_DIRECTORY_REPO,
                 DAEMON_COORDINATES,
                 "--classpath",
@@ -184,14 +241,18 @@ object BrowserSpecRunner {
             cwd = File("."),
             captureOutput = true,
         )
-        return result.stdout.trim().lineSequence().lastOrNull { it.contains(':') && it.contains(".jar") }
+        val cp = result.stdout.trim().lineSequence()
+            .lastOrNull { it.contains(':') && it.contains(".jar") }
             ?: error(
                 "coursier fetch --classpath returned no classpath line for $DAEMON_COORDINATES. " +
                     "stdout:\n${result.stdout.takeLast(2048)}",
             )
+        cacheFile.parentFile.mkdirs()
+        cacheFile.writeText(cp)
+        return cp
     }
 
-    private fun fetchExtensionDist(repoRoot: File): File {
+    private fun fetchExtensionDist(repoRoot: File, coursier: String): File {
         val cacheDir = File(repoRoot, ".harness-cache/extension-dist")
         val marker = File(cacheDir, ".ok")
         if (marker.isFile) {
@@ -201,7 +262,7 @@ object BrowserSpecRunner {
         println("[harness] Fetching $EXTENSION_DIST_COORDINATES")
         val result = runCommand(
             listOf(
-                "coursier", "fetch",
+                coursier, "fetch",
                 "-r", KOTLIN_DIRECTORY_REPO,
                 EXTENSION_DIST_COORDINATES,
             ),
