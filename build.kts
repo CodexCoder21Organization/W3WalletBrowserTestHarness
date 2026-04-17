@@ -17,7 +17,7 @@ val dependencies = resolveDependencies(
 @MavenArtifactCoordinates("w3wallet.browser.testharness:W3WalletBrowserTestHarness:")
 fun buildMaven(): File {
     return buildSimpleKotlinMavenArtifact(
-        coordinates = "w3wallet.browser.testharness:W3WalletBrowserTestHarness:0.0.5",
+        coordinates = "w3wallet.browser.testharness:W3WalletBrowserTestHarness:0.0.6",
         src = File("src"),
         compileDependencies = dependencies,
     )

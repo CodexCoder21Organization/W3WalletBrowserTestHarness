@@ -320,8 +320,25 @@ object BrowserSpecRunner {
         )
         if (onPath.exitCode == 0) {
             val nodeBin = File(onPath.stdout.trim().lines().first()).parentFile
-            println("[harness] Using system Node from ${nodeBin.absolutePath}")
-            return nodeBin.absolutePath
+            // Playwright 1.48 requires Node 18+. Ubuntu 22.04 ships Node 12 at
+            // /usr/bin/node; running `npx playwright install chromium` with
+            // Node 12 exits 127 (the script can't parse modern syntax). Only
+            // accept system Node if the major version is ≥ 18.
+            val versionResult = runCommand(
+                listOf(File(nodeBin, "node").absolutePath, "--version"),
+                cwd = File("."),
+                captureOutput = true,
+                failOnNonZero = false,
+            )
+            val major = Regex("""v(\d+)""").find(versionResult.stdout.trim())?.groupValues?.get(1)?.toIntOrNull()
+            if (major != null && major >= 18) {
+                println("[harness] Using system Node ${versionResult.stdout.trim()} from ${nodeBin.absolutePath}")
+                return nodeBin.absolutePath
+            }
+            println(
+                "[harness] System Node ${versionResult.stdout.trim().ifEmpty { "(unknown version)" }} " +
+                    "at ${nodeBin.absolutePath} is too old; downloading Node 20 into the cache",
+            )
         }
         val nodeHome = File(repoRoot, ".harness-cache/node")
         val nodeBin = File(nodeHome, "bin")
