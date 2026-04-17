@@ -69,9 +69,18 @@ object BrowserSpecRunner {
                     .listFiles()?.map { it.name }?.filter { it.endsWith(".spec.ts") }?.sorted() ?: "none"}"
         }
 
-        val deps = resolveDependencies(repoRoot)
-        val nodeBin = ensureNodeOnPath(repoRoot)
-        ensurePlaywrightInstalled(repoRoot, nodeBin)
+        // Serialize first-run bootstrap across parallel kompile test JVMs.
+        // kotlin.build invokes kompile-cli directly (no `scripts/test.bash`
+        // runs beforehand) and spawns multiple test JVMs in parallel; without
+        // a lock each JVM would independently download Node, run npm
+        // install, and fetch Playwright's Chromium, thrashing the network
+        // and blowing through every @Timeout.
+        val (deps, nodeBin) = withBootstrapLock(repoRoot) {
+            val d = resolveDependencies(repoRoot)
+            val n = ensureNodeOnPath(repoRoot)
+            ensurePlaywrightInstalled(repoRoot, n)
+            d to n
+        }
 
         val port = derivePort(specFileBasename, prefix = "daemon")
         val demoPort = derivePort(specFileBasename, prefix = "demo")
@@ -97,6 +106,29 @@ object BrowserSpecRunner {
             }
         } finally {
             daemon.stop()
+        }
+    }
+
+    /**
+     * Run [block] while holding an exclusive file lock at
+     * `.harness-cache/bootstrap.lock`. Parallel test JVMs serialize here so
+     * only one ever performs the Node + npm + Playwright setup; the others
+     * block until the holder releases and then observe a warm cache.
+     */
+    private fun <T> withBootstrapLock(repoRoot: File, block: () -> T): T {
+        val cacheDir = File(repoRoot, ".harness-cache").apply { mkdirs() }
+        val lockFile = File(cacheDir, "bootstrap.lock")
+        val raf = java.io.RandomAccessFile(lockFile, "rw")
+        val channel = raf.channel
+        println("[harness] Acquiring bootstrap lock at $lockFile")
+        val lock = channel.lock()
+        try {
+            println("[harness] Bootstrap lock acquired")
+            return block()
+        } finally {
+            try { lock.release() } catch (_: Throwable) {}
+            try { channel.close() } catch (_: Throwable) {}
+            try { raf.close() } catch (_: Throwable) {}
         }
     }
 
