@@ -1,0 +1,6 @@
+{
+  "name": "W3WalletBrowserTestHarness",
+  "source": "src",
+  "buildscript": "build.kts",
+  "readme": "README.md"
+}
