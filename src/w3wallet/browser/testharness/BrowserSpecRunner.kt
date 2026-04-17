@@ -90,12 +90,16 @@ object BrowserSpecRunner {
         try {
             val demo = startDemo(deps, runDir, demoPort)
             try {
+                // Pin IPv4 loopback — on the kotlin.build droplet `localhost`
+                // resolves to ::1 first, and W3WalletDaemon only listens on
+                // 127.0.0.1 by default. Playwright's extension then hits
+                // `ECONNREFUSED ::1:<port>` because nothing is bound to v6.
                 runPlaywright(
                     repoRoot = repoRoot,
                     spec = specFileBasename,
-                    demoUrl = "http://localhost:$demoPort",
+                    demoUrl = "http://127.0.0.1:$demoPort",
                     daemonUrl = daemon.daemonUrl,
-                    daemonWsUrl = "ws://localhost:$port/ws",
+                    daemonWsUrl = "ws://127.0.0.1:$port/ws",
                     daemonDbPath = daemon.dbPath,
                     extensionDistDir = deps.extensionDistDir,
                     daemonClasspath = deps.daemonClasspath,
