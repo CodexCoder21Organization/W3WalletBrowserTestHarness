@@ -15,10 +15,10 @@ import w3wallet.browser.testharness.BrowserSpecRunner
  * A real integration test of `runSpec` would need a fully-checked-out
  * consumer repository with a demo fat JAR, W3WalletDaemon clone, and a
  * W3WalletExtension dist — end-to-end behaviour is verified from inside
- * each consuming project's own `tests/*.kts`. This test only guards the
- * artifact itself: if the Maven artifact fails to publish, or if
- * `BrowserSpecRunner` moves package or accidentally becomes private,
- * kompile fails this test.
+ * each consuming project's own `tests/` directory. This test only
+ * guards the artifact itself: if the Maven artifact fails to publish,
+ * or if `BrowserSpecRunner` moves package or accidentally becomes
+ * private, kompile fails this test.
  */
 fun testBrowserSpecRunnerIsImportable() {
     // Access the singleton so the classloader resolves it.
