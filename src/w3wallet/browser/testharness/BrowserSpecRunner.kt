@@ -580,9 +580,13 @@ object BrowserSpecRunner {
             "PATH" to "$nodeBin:${System.getenv("PATH") ?: ""}",
         )
 
-        val useXvfb = System.getenv("CI") == "true" &&
-            System.getenv("DISPLAY").isNullOrBlank() &&
-            hasCommand("xvfb-run")
+        // Playwright's `chromium.launchPersistentContext({ headless: false })`
+        // needs a real display for the extension to load; the npm harness's
+        // `launchChromiumWithExtension` uses that mode. Wrap in xvfb-run
+        // whenever there is no DISPLAY, regardless of CI env, and install
+        // xvfb on the fly if it's missing (as on the kotlin.build droplet).
+        val needDisplay = System.getenv("DISPLAY").isNullOrBlank()
+        val useXvfb = if (needDisplay) ensureXvfb() else false
         val cmd = if (useXvfb) {
             listOf("xvfb-run", "-a", "$nodeBin/npx", "playwright", "test", "tests/$spec")
         } else {
@@ -593,6 +597,42 @@ object BrowserSpecRunner {
         if (exit != 0) {
             error("Playwright spec '$spec' failed with exit code $exit")
         }
+    }
+
+    /**
+     * Make sure `xvfb-run` is on PATH so the Playwright invocation can run
+     * headed Chromium (required by the extension). Returns true when xvfb-run
+     * is usable, false when we couldn't install it (caller falls back to
+     * invoking Playwright without a display — which will fail loudly rather
+     * than hang). Tried in order:
+     *  1. Already on PATH → return true.
+     *  2. `apt-get install -y xvfb` if we're root on a Debian-family image
+     *     (covers the kotlin.build droplet).
+     *  3. Give up and return false.
+     */
+    private fun ensureXvfb(): Boolean {
+        if (hasCommand("xvfb-run")) return true
+        // Only attempt apt install when running as root (droplet image) and
+        // apt-get exists; otherwise let Playwright fail with its own hint.
+        if (!hasCommand("apt-get")) return false
+        val whoami = runCommand(
+            listOf("id", "-u"),
+            cwd = File("."),
+            captureOutput = true,
+            failOnNonZero = false,
+        )
+        if (whoami.stdout.trim() != "0") return false
+        println("[harness] Installing xvfb via apt-get")
+        val install = runCommand(
+            listOf(
+                "sh", "-c",
+                "DEBIAN_FRONTEND=noninteractive apt-get update -qq && " +
+                    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb",
+            ),
+            cwd = File("."),
+            failOnNonZero = false,
+        )
+        return install.exitCode == 0 && hasCommand("xvfb-run")
     }
 
     // ---- Low-level helpers -------------------------------------------------
