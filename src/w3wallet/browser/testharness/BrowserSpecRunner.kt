@@ -46,7 +46,7 @@ import kotlin.concurrent.thread
 object BrowserSpecRunner {
 
     /** kotlin.directory Maven coordinates for the daemon the tests exercise. */
-    private const val DAEMON_COORDINATES = "com.w3wallet:W3WalletDaemon:1.0.2"
+    private const val DAEMON_COORDINATES = "com.w3wallet:W3WalletDaemon:1.0.3"
 
     /** kotlin.directory Maven coordinates for the prebuilt extension dist/. */
     private const val EXTENSION_DIST_COORDINATES = "com.w3wallet:W3WalletExtensionDist:0.0.1"
