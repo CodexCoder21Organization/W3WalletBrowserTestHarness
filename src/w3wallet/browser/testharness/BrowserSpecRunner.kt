@@ -184,7 +184,7 @@ object BrowserSpecRunner {
             cwd = File("."),
             captureOutput = true,
         )
-        return result.stdout.trim().lineSequence().lastOrNull { it.contains(':') && it.contains('.jar') }
+        return result.stdout.trim().lineSequence().lastOrNull { it.contains(':') && it.contains(".jar") }
             ?: error(
                 "coursier fetch --classpath returned no classpath line for $DAEMON_COORDINATES. " +
                     "stdout:\n${result.stdout.takeLast(2048)}",
