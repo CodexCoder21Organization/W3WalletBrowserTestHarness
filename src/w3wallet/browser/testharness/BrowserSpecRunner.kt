@@ -147,12 +147,23 @@ object BrowserSpecRunner {
     }
 
     private fun buildDemoJar(repoRoot: File): File {
+        // Reuse an already-built fat JAR. Gradle's own up-to-date check
+        // handles source changes inside a single CI run; across separate
+        // kompile test JVMs (each spawns its own process) we'd otherwise
+        // pay ~30s per test just for Gradle to conclude "nothing to do".
+        val libs = File(repoRoot, "build/libs")
+        val cached = libs.takeIf { it.isDirectory }
+            ?.listFiles { f -> f.name.endsWith("-all.jar") }
+            ?.firstOrNull()
+        if (cached != null) {
+            println("[harness] Reusing cached demo fat JAR: ${cached.name}")
+            return cached
+        }
         println("[harness] Building demo fat JAR under $repoRoot")
         runCommand(
             listOf("./gradlew", "fatJar", "-x", "test", "--no-daemon"),
             cwd = repoRoot,
         )
-        val libs = File(repoRoot, "build/libs")
         return libs.listFiles { f -> f.name.endsWith("-all.jar") }?.firstOrNull()
             ?: error("demo fat JAR not found under $libs after gradle fatJar")
     }
@@ -165,12 +176,30 @@ object BrowserSpecRunner {
             println("[harness] Cloning W3WalletDaemon into $clone")
             runCommand(listOf("git", "clone", "--depth", "1", url, clone.absolutePath), cwd = depsDir)
         }
+        val libs = File(clone, "build/libs")
+        val cached = libs.takeIf { it.isDirectory }
+            ?.listFiles { f ->
+                f.name.endsWith(".jar") &&
+                    !f.name.contains("sources") &&
+                    !f.name.contains("javadoc")
+            }
+            ?.firstOrNull { it.name.endsWith("-all.jar") }
+            ?: libs.takeIf { it.isDirectory }
+                ?.listFiles { f ->
+                    f.name.endsWith(".jar") &&
+                        !f.name.contains("sources") &&
+                        !f.name.contains("javadoc")
+                }
+                ?.firstOrNull()
+        if (cached != null) {
+            println("[harness] Reusing cached W3WalletDaemon JAR: ${cached.name}")
+            return cached
+        }
         println("[harness] Building W3WalletDaemon fat JAR")
         runCommand(
             listOf("./gradlew", "fatJar", "-x", "test", "--no-daemon"),
             cwd = clone,
         )
-        val libs = File(clone, "build/libs")
         return libs.listFiles { f -> f.name.endsWith("-all.jar") }?.firstOrNull()
             ?: libs.listFiles { f ->
                 f.name.endsWith(".jar") &&
@@ -189,31 +218,42 @@ object BrowserSpecRunner {
             runCommand(listOf("git", "clone", "--depth", "1", url, clone.absolutePath), cwd = depsDir)
         }
         val dist = File(clone, "dist")
-        if (!dist.isDirectory) {
-            println("[harness] Building W3WalletExtension dist/")
-            runCommand(listOf("npm", "ci"), cwd = clone)
-            runCommand(listOf("npm", "run", "build"), cwd = clone)
+        if (dist.isDirectory) {
+            println("[harness] Reusing cached W3WalletExtension/dist/")
+            return dist
         }
+        println("[harness] Building W3WalletExtension dist/")
+        runCommand(listOf("npm", "ci"), cwd = clone)
+        runCommand(listOf("npm", "run", "build"), cwd = clone)
         require(dist.isDirectory) { "W3WalletExtension/dist/ not produced by npm run build" }
         return dist
     }
 
     private fun ensurePlaywrightInstalled(repoRoot: File) {
-        // `npm install` is idempotent; the node_modules marker is fine as a cache.
         if (!File(repoRoot, "node_modules/@playwright/test").isDirectory) {
             println("[harness] Installing browser-e2e npm deps")
             File(repoRoot, "package-lock.json").delete()
             runCommand(listOf("npm", "install", "--no-audit", "--no-fund"), cwd = repoRoot)
+        } else {
+            println("[harness] Reusing cached node_modules")
         }
-        // Playwright's own browser cache lives at ~/.cache/ms-playwright; if the
-        // daemon-jar or dist cache is present but the browser isn't yet, this
-        // is a quick no-op.
-        println("[harness] Ensuring Playwright Chromium is installed")
-        runCommand(
-            listOf("npx", "playwright", "install", "chromium"),
-            cwd = repoRoot,
-            timeoutSeconds = 600,
-        )
+        // Playwright's browser install is a no-op when the Chromium cache
+        // at ~/.cache/ms-playwright is already populated, but the CLI still
+        // scans apt sources — skip the call entirely when a Chromium cache
+        // is already present.
+        val playwrightCache = File(System.getProperty("user.home"), ".cache/ms-playwright")
+        val chromiumInstalled = playwrightCache.isDirectory &&
+            (playwrightCache.listFiles()?.any { it.name.startsWith("chromium-") } == true)
+        if (chromiumInstalled) {
+            println("[harness] Reusing cached Playwright Chromium")
+        } else {
+            println("[harness] Installing Playwright Chromium")
+            runCommand(
+                listOf("npx", "playwright", "install", "chromium"),
+                cwd = repoRoot,
+                timeoutSeconds = 600,
+            )
+        }
     }
 
     // ---- Daemon / demo lifecycle -------------------------------------------
