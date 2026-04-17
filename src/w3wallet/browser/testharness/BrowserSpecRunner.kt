@@ -70,7 +70,8 @@ object BrowserSpecRunner {
         }
 
         val deps = resolveDependencies(repoRoot)
-        ensurePlaywrightInstalled(repoRoot)
+        val nodeBin = ensureNodeOnPath(repoRoot)
+        ensurePlaywrightInstalled(repoRoot, nodeBin)
 
         val port = derivePort(specFileBasename, prefix = "daemon")
         val demoPort = derivePort(specFileBasename, prefix = "demo")
@@ -89,6 +90,7 @@ object BrowserSpecRunner {
                     daemonDbPath = daemon.dbPath,
                     extensionDistDir = deps.extensionDistDir,
                     daemonClasspath = deps.daemonClasspath,
+                    nodeBin = nodeBin,
                 )
             } finally {
                 demo.stop()
@@ -303,11 +305,75 @@ object BrowserSpecRunner {
         return cacheDir
     }
 
-    private fun ensurePlaywrightInstalled(repoRoot: File) {
+    /**
+     * Return a PATH entry that has `node` and `npm` on it. Prefers the
+     * system install. If neither is found (as on the kotlin.build droplet),
+     * downloads an official Node.js 20 tarball into `.harness-cache/node`
+     * and returns its `bin/` directory.
+     */
+    private fun ensureNodeOnPath(repoRoot: File): String {
+        val onPath = runCommand(
+            listOf("sh", "-c", "command -v npx && command -v npm && command -v node"),
+            cwd = File("."),
+            captureOutput = true,
+            failOnNonZero = false,
+        )
+        if (onPath.exitCode == 0) {
+            val nodeBin = File(onPath.stdout.trim().lines().first()).parentFile
+            println("[harness] Using system Node from ${nodeBin.absolutePath}")
+            return nodeBin.absolutePath
+        }
+        val nodeHome = File(repoRoot, ".harness-cache/node")
+        val nodeBin = File(nodeHome, "bin")
+        if (File(nodeBin, "node").canExecute() && File(nodeBin, "npm").isFile) {
+            println("[harness] Reusing cached Node at $nodeBin")
+            return nodeBin.absolutePath
+        }
+        val osName = System.getProperty("os.name").lowercase()
+        val osArch = System.getProperty("os.arch").lowercase()
+        val (os, ext) = when {
+            "linux" in osName -> "linux" to "tar.xz"
+            "mac" in osName || "darwin" in osName -> "darwin" to "tar.xz"
+            else -> error("[harness] Automatic Node install not supported on $osName; install Node 20 manually.")
+        }
+        val arch = when {
+            "aarch64" in osArch || "arm64" in osArch -> "arm64"
+            "amd64" in osArch || "x86_64" in osArch -> "x64"
+            else -> error("[harness] Automatic Node install not supported for arch $osArch.")
+        }
+        val version = "v20.18.0"
+        val tarName = "node-$version-$os-$arch.$ext"
+        val url = "https://nodejs.org/dist/$version/$tarName"
+        val cacheRoot = File(repoRoot, ".harness-cache")
+        cacheRoot.mkdirs()
+        val tarPath = File(cacheRoot, tarName)
+        println("[harness] Downloading Node $version for $os/$arch from $url")
+        runCommand(listOf("curl", "-fLo", tarPath.absolutePath, url), cwd = cacheRoot)
+        if (nodeHome.exists()) nodeHome.deleteRecursively()
+        nodeHome.mkdirs()
+        // Strip the outer `node-v20-*` directory from the tarball so bin/ lands
+        // directly under .harness-cache/node/.
+        runCommand(
+            listOf("tar", "-xJf", tarPath.absolutePath, "--strip-components=1", "-C", nodeHome.absolutePath),
+            cwd = cacheRoot,
+        )
+        require(File(nodeBin, "node").canExecute() && File(nodeBin, "npm").isFile) {
+            "Extracted Node install is missing bin/node or bin/npm at $nodeBin"
+        }
+        return nodeBin.absolutePath
+    }
+
+    private fun ensurePlaywrightInstalled(repoRoot: File, nodeBin: String) {
+        val npxPath = "$nodeBin:${System.getenv("PATH") ?: ""}"
+        val pathEnv = mapOf("PATH" to npxPath)
         if (!File(repoRoot, "node_modules/@playwright/test").isDirectory) {
             println("[harness] Installing browser-e2e npm deps")
             File(repoRoot, "package-lock.json").delete()
-            runCommand(listOf("npm", "install", "--no-audit", "--no-fund"), cwd = repoRoot)
+            runCommand(
+                listOf("$nodeBin/npm", "install", "--no-audit", "--no-fund"),
+                cwd = repoRoot,
+                extraEnv = pathEnv,
+            )
         } else {
             println("[harness] Reusing cached node_modules")
         }
@@ -319,8 +385,9 @@ object BrowserSpecRunner {
         } else {
             println("[harness] Installing Playwright Chromium")
             runCommand(
-                listOf("npx", "playwright", "install", "chromium"),
+                listOf("$nodeBin/npx", "playwright", "install", "chromium"),
                 cwd = repoRoot,
+                extraEnv = pathEnv,
                 timeoutSeconds = 600,
             )
         }
@@ -449,6 +516,7 @@ object BrowserSpecRunner {
         daemonDbPath: File,
         extensionDistDir: File,
         daemonClasspath: String,
+        nodeBin: String,
     ) {
         val env = mapOf(
             "DEMO_URL" to demoUrl,
@@ -456,20 +524,20 @@ object BrowserSpecRunner {
             "DAEMON_WS_URL" to daemonWsUrl,
             "DAEMON_SQLITE_PATH" to daemonDbPath.absolutePath,
             "EXTENSION_DIST_DIR" to extensionDistDir.absolutePath,
-            // DAEMON_JAR is a legacy pointer some specs inspect; now it's a
-            // classpath string, not a single JAR, so they must not pass it
-            // directly to `java -jar`. Kept for backward compatibility with
-            // specs that only read it to decide whether to self-launch.
             "DAEMON_CLASSPATH" to daemonClasspath,
+            // Put our Node install first on PATH so playwright shells launched
+            // by the spec (e.g. testP2pReconnectAfterDaemonRestart's
+            // `java -cp $DAEMON_CLASSPATH ...`) see a consistent env.
+            "PATH" to "$nodeBin:${System.getenv("PATH") ?: ""}",
         )
 
         val useXvfb = System.getenv("CI") == "true" &&
             System.getenv("DISPLAY").isNullOrBlank() &&
             hasCommand("xvfb-run")
         val cmd = if (useXvfb) {
-            listOf("xvfb-run", "-a", "npx", "playwright", "test", "tests/$spec")
+            listOf("xvfb-run", "-a", "$nodeBin/npx", "playwright", "test", "tests/$spec")
         } else {
-            listOf("npx", "playwright", "test", "tests/$spec")
+            listOf("$nodeBin/npx", "playwright", "test", "tests/$spec")
         }
         println("[harness] Running Playwright: ${cmd.joinToString(" ")}")
         val exit = runCommand(cmd, cwd = repoRoot, extraEnv = env, failOnNonZero = false).exitCode
