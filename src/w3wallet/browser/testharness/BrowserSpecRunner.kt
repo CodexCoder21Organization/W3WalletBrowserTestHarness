@@ -49,7 +49,7 @@ object BrowserSpecRunner {
     private const val DAEMON_COORDINATES = "com.w3wallet:W3WalletDaemon:1.0.3"
 
     /** kotlin.directory Maven coordinates for the prebuilt extension dist/. */
-    private const val EXTENSION_DIST_COORDINATES = "com.w3wallet:W3WalletExtensionDist:0.0.1"
+    private const val EXTENSION_DIST_COORDINATES = "com.w3wallet:W3WalletExtensionDist:0.0.2"
 
     private const val KOTLIN_DIRECTORY_REPO = "https://kotlin.directory"
 
@@ -86,6 +86,16 @@ object BrowserSpecRunner {
         val demoPort = derivePort(specFileBasename, prefix = "demo")
         val runDir = File(repoRoot, ".run-$specFileBasename").apply { mkdirs() }
 
+        // Each test gets its own copy of the extension dist/ so we can
+        // stamp a per-test daemon URL into the manifest without racing
+        // with sibling tests. IPv4-pinned for the same reason
+        // DEMO_URL / DAEMON_WS_URL below are.
+        val perTestExtensionDir = preparePerTestExtensionDir(
+            deps.extensionDistDir,
+            runDir,
+            daemonWsUrl = "ws://127.0.0.1:$port/ws",
+        )
+
         val daemon = startDaemon(deps, runDir, port)
         try {
             val demo = startDemo(deps, runDir, demoPort)
@@ -101,7 +111,7 @@ object BrowserSpecRunner {
                     daemonUrl = daemon.daemonUrl,
                     daemonWsUrl = "ws://127.0.0.1:$port/ws",
                     daemonDbPath = daemon.dbPath,
-                    extensionDistDir = deps.extensionDistDir,
+                    extensionDistDir = perTestExtensionDir,
                     daemonClasspath = deps.daemonClasspath,
                     nodeBin = nodeBin,
                 )
@@ -111,6 +121,45 @@ object BrowserSpecRunner {
         } finally {
             daemon.stop()
         }
+    }
+
+    /**
+     * Copy the cached extension dist into a per-test directory and stamp the
+     * per-spec daemon WebSocket URL into the manifest's `w3wallet_daemon_url`
+     * field. W3WalletExtension 0.0.2+ reads that field at startup
+     * (`chrome.runtime.getManifest().w3wallet_daemon_url`), so each test's
+     * Chromium talks to its own daemon instance without parallel tests
+     * colliding on a shared port.
+     */
+    private fun preparePerTestExtensionDir(
+        cachedDistDir: File,
+        runDir: File,
+        daemonWsUrl: String,
+    ): File {
+        val perTestDir = File(runDir, "extension")
+        if (perTestDir.exists()) perTestDir.deleteRecursively()
+        perTestDir.mkdirs()
+        cachedDistDir.copyRecursively(perTestDir, overwrite = true)
+
+        val manifest = File(perTestDir, "manifest.json")
+        require(manifest.isFile) {
+            "Extension dist at $perTestDir is missing manifest.json — did the cached dist extract correctly?"
+        }
+        val original = manifest.readText()
+        // Use a literal string match against the manifest's declared default
+        // so we never accidentally alter any unrelated URL in the manifest.
+        val marker = "\"w3wallet_daemon_url\""
+        require(original.contains(marker)) {
+            "Extension manifest at $manifest does not declare $marker — the harness " +
+                "requires W3WalletExtensionDist 0.0.2 or later, which exposes the " +
+                "daemon URL as a manifest key."
+        }
+        // Preserve formatting — swap only the value string.
+        val patched = Regex(""""w3wallet_daemon_url"\s*:\s*"[^"]*"""")
+            .replace(original, "\"w3wallet_daemon_url\": \"$daemonWsUrl\"")
+        manifest.writeText(patched)
+        println("[harness] Stamped $daemonWsUrl into ${manifest.absolutePath}")
+        return perTestDir
     }
 
     /**
