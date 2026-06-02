@@ -13,8 +13,8 @@ if [ ! -f "$JAR_PATH" ]; then
     chmod +x "$COURSIER_PATH"
   fi
 
-  echo "Fetching kompile-cli:kompile-cli:0.0.2 from https://kotlin.directory/..."
-  CLASSPATH=$("$COURSIER_PATH" fetch --repository https://kotlin.directory/ --repository central kompile-cli:kompile-cli:0.0.2 --classpath)
+  echo "Fetching kompile.cli:kompile-cli:0.0.65 from https://kotlin.directory/..."
+  CLASSPATH=$("$COURSIER_PATH" fetch --repository https://kotlin.directory/ --repository central kompile.cli:kompile-cli:0.0.65 --classpath)
 
   cat > "$JAR_PATH" <<'LAUNCHER_EOF'
 #!/bin/bash
