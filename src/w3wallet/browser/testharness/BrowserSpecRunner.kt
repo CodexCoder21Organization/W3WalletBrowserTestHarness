@@ -1,10 +1,18 @@
 package w3wallet.browser.testharness
 
+import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.IOException
+import java.io.OutputStream
+import java.nio.file.Files
+import java.nio.file.Paths
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarFile
 import kotlin.concurrent.thread
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 
 /**
  * Runs a single Playwright browser-e2e spec from a kompile test.kts.
@@ -454,11 +462,11 @@ object BrowserSpecRunner {
         if (nodeHome.exists()) nodeHome.deleteRecursively()
         nodeHome.mkdirs()
         // Strip the outer `node-v20-*` directory from the tarball so bin/ lands
-        // directly under .harness-cache/node/.
-        runCommand(
-            listOf("tar", "-xJf", tarPath.absolutePath, "--strip-components=1", "-C", nodeHome.absolutePath),
-            cwd = cacheRoot,
-        )
+        // directly under .harness-cache/node/. Extracted entirely in-process via
+        // Apache Commons Compress so the harness does not depend on the `tar`/`xz`
+        // binaries being installed on the runner (the bld-all-tests containers ship
+        // neither, which previously made `tar -xJf` fail with "xz: Cannot exec").
+        extractTarXz(tarPath, nodeHome, stripComponents = 1)
         require(File(nodeBin, "node").canExecute() && File(nodeBin, "npm").isFile) {
             "Extracted Node install is missing bin/node or bin/npm at $nodeBin"
         }
@@ -753,5 +761,48 @@ object BrowserSpecRunner {
             hash = (hash * 31 + c.code) and 0x7fffffff
         }
         return 20000 + (hash % 10000)
+    }
+}
+
+/**
+ * Extracts a `.tar.xz` archive entirely in-process using Apache Commons Compress,
+ * so the harness does not depend on the `tar` or `xz` binaries being present on
+ * the runner. `stripComponents` drops that many leading path segments from every
+ * entry (mirrors `tar --strip-components=N`). Executable permission bits and
+ * symbolic links are preserved, so the extracted `bin/node` stays runnable and
+ * `bin/npm` (a symlink into `lib/`) resolves.
+ */
+fun extractTarXz(tarFile: File, destDir: File, stripComponents: Int = 0) {
+    destDir.mkdirs()
+    BufferedInputStream(FileInputStream(tarFile)).use { fileIn ->
+        XZCompressorInputStream(fileIn).use { xzIn ->
+            TarArchiveInputStream(xzIn).use { tarIn ->
+                var entry = tarIn.nextTarEntry
+                while (entry != null) {
+                    val segments = entry.name.split('/')
+                    if (segments.size > stripComponents) {
+                        val relative = segments.drop(stripComponents).joinToString("/")
+                        if (relative.isNotEmpty()) {
+                            val outFile = File(destDir, relative)
+                            when {
+                                entry.isDirectory -> outFile.mkdirs()
+                                entry.isSymbolicLink -> {
+                                    outFile.parentFile?.mkdirs()
+                                    Files.deleteIfExists(outFile.toPath())
+                                    Files.createSymbolicLink(outFile.toPath(), Paths.get(entry.linkName))
+                                }
+                                else -> {
+                                    outFile.parentFile?.mkdirs()
+                                    FileOutputStream(outFile).use { out: OutputStream -> tarIn.copyTo(out) }
+                                    // Preserve any execute bit (owner/group/other) from the tar mode.
+                                    if ((entry.mode and 73) != 0) outFile.setExecutable(true, false)
+                                }
+                            }
+                        }
+                    }
+                    entry = tarIn.nextTarEntry
+                }
+            }
+        }
     }
 }
