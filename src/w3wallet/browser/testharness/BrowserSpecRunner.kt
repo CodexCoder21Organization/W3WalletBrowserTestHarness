@@ -648,16 +648,65 @@ object BrowserSpecRunner {
         // xvfb on the fly if it's missing (as on the kotlin.build droplet).
         val needDisplay = System.getenv("DISPLAY").isNullOrBlank()
         val useXvfb = if (needDisplay) ensureXvfb() else false
-        val cmd = if (useXvfb) {
-            listOf("xvfb-run", "-a", "$nodeBin/npx", "playwright", "test", "tests/$spec")
-        } else {
-            listOf("$nodeBin/npx", "playwright", "test", "tests/$spec")
-        }
+        // Give each spec its OWN Playwright output dir. The harness runs every
+        // spec as a separate `npx playwright test` invocation, and Playwright
+        // cleans its outputDir at the start of each run — so a shared
+        // `test-results/` means each spec WIPES the previous spec's traces and
+        // error-context.md, leaving only the last spec's artifacts (a failing
+        // spec's diagnosis vanishes the moment the next spec runs). A per-spec
+        // dir preserves all of them for the CI `test-results/**` upload.
+        val specSlug = spec.removeSuffix(".spec.ts").removeSuffix(".ts")
+        val outputDir = "test-results/$specSlug"
+        val playwrightCmd =
+            listOf("$nodeBin/npx", "playwright", "test", "tests/$spec", "--output", outputDir)
+        val cmd = if (useXvfb) listOf("xvfb-run", "-a") + playwrightCmd else playwrightCmd
         println("[harness] Running Playwright: ${cmd.joinToString(" ")}")
-        val exit = runCommand(cmd, cwd = repoRoot, extraEnv = env, failOnNonZero = false).exitCode
-        if (exit != 0) {
-            error("Playwright spec '$spec' failed with exit code $exit")
+        // Capture the output so a FAILURE can surface the REAL Playwright error
+        // (assertion / timeout / connection refused) in the thrown exception —
+        // which is what the kompile test runner reports back to CI. Without this
+        // the runner shows only "exit code 1" and the actual error is invisible
+        // unless someone digs the per-spec artifact out of the upload, which
+        // defeats diagnosis.
+        val result = runCommand(
+            cmd,
+            cwd = repoRoot,
+            extraEnv = env,
+            captureOutput = true,
+            failOnNonZero = false,
+            timeoutSeconds = 1800,
+        )
+        if (result.exitCode != 0) {
+            val errorContext = readPlaywrightErrorContext(File(repoRoot, outputDir))
+            val detail = buildString {
+                append("Playwright spec '$spec' failed with exit code ${result.exitCode}.\n")
+                append("--- playwright output (tail) ---\n")
+                append(result.stdout.takeLast(6000).ifBlank { "(no stdout captured)" })
+                if (result.stderr.isNotBlank()) {
+                    append("\n--- stderr (tail) ---\n")
+                    append(result.stderr.takeLast(2000))
+                }
+                if (errorContext.isNotBlank()) {
+                    append("\n--- error-context.md ---\n")
+                    append(errorContext)
+                }
+            }
+            // Echo to stdout for the live log, then fail with the same detail in
+            // the exception (the channel the kompile runner reliably surfaces).
+            println(detail)
+            error(detail)
         }
+    }
+
+    /**
+     * Read the Playwright-generated `error-context.md` file(s) under [outputDir]
+     * (Playwright writes one per failing test) so the real failure can be folded
+     * into the thrown exception. Returns "" when none exist.
+     */
+    private fun readPlaywrightErrorContext(outputDir: File): String {
+        if (!outputDir.isDirectory) return ""
+        return outputDir.walkTopDown()
+            .filter { it.isFile && it.name == "error-context.md" }
+            .joinToString("\n\n") { f -> "# ${f.relativeTo(outputDir).path}\n${f.readText().take(4000)}" }
     }
 
     /**
