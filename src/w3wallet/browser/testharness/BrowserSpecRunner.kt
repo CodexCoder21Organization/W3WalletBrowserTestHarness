@@ -90,6 +90,7 @@ object BrowserSpecRunner {
             d to n
         }
 
+        val relayPort = derivePort(specFileBasename, prefix = "relay")
         val port = derivePort(specFileBasename, prefix = "daemon")
         val demoPort = derivePort(specFileBasename, prefix = "demo")
         val runDir = File(repoRoot, ".run-$specFileBasename").apply { mkdirs() }
@@ -104,30 +105,54 @@ object BrowserSpecRunner {
             daemonWsUrl = "ws://127.0.0.1:$port/ws",
         )
 
-        val daemon = startDaemon(deps, runDir, port)
+        // Hermetic networking: launch a LOCAL relay (a daemon with
+        // --no-default-bootstrap) as a stable rendezvous, then point the wallet
+        // daemon and the demo at it via --bootstrap-peer. Nothing contacts the
+        // public relay (198.199.106.165). The relay is a SEPARATE process from
+        // the wallet daemon so it survives daemon restarts (the restart specs
+        // kill/restart the wallet daemon; the relay stays up so the restarted
+        // daemon re-registers and the demo rediscovers it). The relay multiaddr
+        // is also exported to the spec env (W3WALLET_BOOTSTRAP_PEER) so
+        // spec-launched daemons/demos (npm harness daemon.ts / demoJvm.ts) use
+        // the same relay.
+        val relay = startDaemon(
+            deps, runDir, relayPort, "relay",
+            bootstrapArgs = listOf("--no-default-bootstrap"),
+            extractDirectMultiaddr = true,
+        )
         try {
-            val demo = startDemo(deps, runDir, demoPort, daemon.directMultiaddr)
+            val daemon = startDaemon(
+                deps, runDir, port, "daemon",
+                bootstrapArgs = listOf("--bootstrap-peer", relay.directMultiaddr),
+                extractDirectMultiaddr = false,
+            )
             try {
-                // Pin IPv4 loopback — on the kotlin.build droplet `localhost`
-                // resolves to ::1 first, and W3WalletDaemon only listens on
-                // 127.0.0.1 by default. Playwright's extension then hits
-                // `ECONNREFUSED ::1:<port>` because nothing is bound to v6.
-                runPlaywright(
-                    repoRoot = repoRoot,
-                    spec = specFileBasename,
-                    demoUrl = "http://127.0.0.1:$demoPort",
-                    daemonUrl = daemon.daemonUrl,
-                    daemonWsUrl = "ws://127.0.0.1:$port/ws",
-                    daemonDbPath = daemon.dbPath,
-                    extensionDistDir = perTestExtensionDir,
-                    daemonClasspath = deps.daemonClasspath,
-                    nodeBin = nodeBin,
-                )
+                val demo = startDemo(deps, runDir, demoPort, relay.directMultiaddr)
+                try {
+                    // Pin IPv4 loopback — on the kotlin.build droplet `localhost`
+                    // resolves to ::1 first, and W3WalletDaemon only listens on
+                    // 127.0.0.1 by default. Playwright's extension then hits
+                    // `ECONNREFUSED ::1:<port>` because nothing is bound to v6.
+                    runPlaywright(
+                        repoRoot = repoRoot,
+                        spec = specFileBasename,
+                        demoUrl = "http://127.0.0.1:$demoPort",
+                        daemonUrl = daemon.daemonUrl,
+                        daemonWsUrl = "ws://127.0.0.1:$port/ws",
+                        daemonDbPath = daemon.dbPath,
+                        extensionDistDir = perTestExtensionDir,
+                        daemonClasspath = deps.daemonClasspath,
+                        nodeBin = nodeBin,
+                        relayMultiaddr = relay.directMultiaddr,
+                    )
+                } finally {
+                    demo.stop()
+                }
             } finally {
-                demo.stop()
+                daemon.stop()
             }
         } finally {
-            daemon.stop()
+            relay.stop()
         }
     }
 
@@ -534,58 +559,62 @@ object BrowserSpecRunner {
         fun stop() = handle.stop()
     }
 
-    private fun startDaemon(deps: ResolvedDeps, runDir: File, port: Int): DaemonHandle {
-        val dbPath = File(runDir, "wallet.db")
+    /**
+     * Start a W3WalletDaemon JVM under [runDir]/[name]/ with the given
+     * [bootstrapArgs] (e.g. `--no-default-bootstrap` for the relay, or
+     * `--bootstrap-peer <relay>` for the wallet daemon). When
+     * [extractDirectMultiaddr] is true, also parse the daemon's direct
+     * loopback multiaddr (used for the relay rendezvous address); otherwise
+     * the returned [DaemonHandle.directMultiaddr] is "".
+     */
+    private fun startDaemon(
+        deps: ResolvedDeps,
+        runDir: File,
+        port: Int,
+        name: String,
+        bootstrapArgs: List<String>,
+        extractDirectMultiaddr: Boolean,
+    ): DaemonHandle {
+        val instDir = File(runDir, name).apply { mkdirs() }
+        val dbPath = File(instDir, "wallet.db")
         dbPath.delete()
-        File(runDir, "wallet.db-journal").delete()
-        val peersDir = File(runDir, "daemon-peers").apply { mkdirs() }
-        val logFile = File(runDir, "daemon.log")
+        File(instDir, "wallet.db-journal").delete()
+        val peersDir = File(instDir, "peers").apply { mkdirs() }
+        val logFile = File(instDir, "$name.log")
 
-        println("[harness] Starting W3WalletDaemon on port $port (cp via coursier)")
-        // --no-default-bootstrap: the daemon must NOT fall back to the public
-        // relay (198.199.106.165). Tests are hermetic — the daemon joins no
-        // public network and is reached only via its direct localhost listener.
+        println("[harness] Starting W3WalletDaemon '$name' on port $port (${bootstrapArgs.joinToString(" ")})")
         val process = ProcessBuilder(
-            "java", "-cp", deps.daemonClasspath, DAEMON_MAIN_CLASS,
-            "--port", port.toString(),
-            "--db", dbPath.absolutePath,
-            "--peers-dir", peersDir.absolutePath,
-            "--no-default-bootstrap",
+            listOf(
+                "java", "-cp", deps.daemonClasspath, DAEMON_MAIN_CLASS,
+                "--port", port.toString(),
+                "--db", dbPath.absolutePath,
+                "--peers-dir", peersDir.absolutePath,
+            ) + bootstrapArgs,
         )
             .redirectOutput(ProcessBuilder.Redirect.to(logFile))
             .redirectErrorStream(true)
             .start()
 
-        val handle = ProcessHandle(process, "daemon")
+        val handle = ProcessHandle(process, name)
         val daemonUrl = try {
             waitForLogMatch(
-                logFile = logFile,
-                process = process,
-                label = "daemon",
-                regex = Regex("""url://w3wallet\.daemon\.[A-Za-z0-9]+/?"""),
-                timeoutSeconds = 60,
+                logFile, process, name,
+                Regex("""url://w3wallet\.daemon\.[A-Za-z0-9]+/?"""), 60,
             )
         } catch (t: Throwable) {
             handle.stop()
             throw t
         }
 
-        // Parse the daemon's DIRECT listen multiaddr so the demo can dial it
-        // directly. With --no-default-bootstrap the daemon advertises only its
-        // direct listener (no p2p-circuit), e.g.
-        //   Multiaddresses: [/ip4/127.0.0.1/tcp/35555/p2p/12D3KooW...]
-        // We force loopback + the daemon's own peerId (only the tcp port is
-        // load-bearing) — the direct addr is the one whose /p2p/ segment is
-        // immediately the daemon's own peerId (a relayed addr would have the
-        // relay's peerId there first).
-        val directMultiaddr = try {
+        // For the relay, parse its DIRECT loopback listen multiaddr — this is
+        // the rendezvous address the wallet daemon + demo (+ spec-launched
+        // daemons/demos) bootstrap from. Forced to loopback + the relay's own
+        // peerId; only the tcp port is load-bearing.
+        val directMultiaddr = if (!extractDirectMultiaddr) "" else try {
             val peerId = daemonUrl.substringAfter("w3wallet.daemon.").trimEnd('/')
             val directAddr = waitForLogMatch(
-                logFile = logFile,
-                process = process,
-                label = "daemon direct multiaddr",
-                regex = Regex("""/ip4/[0-9.]+/tcp/\d+/p2p/""" + Regex.escape(peerId)),
-                timeoutSeconds = 30,
+                logFile, process, "$name direct multiaddr",
+                Regex("""/ip4/[0-9.]+/tcp/\d+/p2p/""" + Regex.escape(peerId)), 30,
             )
             val tcpPort = Regex("""/tcp/(\d+)/""").find(directAddr)!!.groupValues[1]
             "/ip4/127.0.0.1/tcp/$tcpPort/p2p/$peerId"
@@ -601,16 +630,16 @@ object BrowserSpecRunner {
         deps: ResolvedDeps,
         runDir: File,
         port: Int,
-        daemonBootstrap: String,
+        relayMultiaddr: String,
     ): ProcessHandle {
         val logFile = File(runDir, "demo.log")
-        println("[harness] Starting WalletDemoServer on port $port (daemon bootstrap: $daemonBootstrap)")
-        // --bootstrap-peer = the daemon's direct localhost addr: the demo's
-        // UrlResolver dials the daemon directly, never the public relay.
+        println("[harness] Starting WalletDemoServer on port $port (relay bootstrap: $relayMultiaddr)")
+        // --bootstrap-peer = the LOCAL relay: the demo's UrlResolver discovers
+        // and dials the daemon through the local relay, never the public one.
         val process = ProcessBuilder(
             "java", "-jar", deps.demoJar.absolutePath,
             "--port", port.toString(),
-            "--bootstrap-peer", daemonBootstrap,
+            "--bootstrap-peer", relayMultiaddr,
         )
             .redirectOutput(ProcessBuilder.Redirect.to(logFile))
             .redirectErrorStream(true)
@@ -670,6 +699,7 @@ object BrowserSpecRunner {
         extensionDistDir: File,
         daemonClasspath: String,
         nodeBin: String,
+        relayMultiaddr: String,
     ) {
         val env = mapOf(
             "DEMO_URL" to demoUrl,
@@ -678,6 +708,10 @@ object BrowserSpecRunner {
             "DAEMON_SQLITE_PATH" to daemonDbPath.absolutePath,
             "EXTENSION_DIST_DIR" to extensionDistDir.absolutePath,
             "DAEMON_CLASSPATH" to daemonClasspath,
+            // The LOCAL relay rendezvous. Spec-launched daemons/demos (via the
+            // npm harness daemon.ts / demoJvm.ts) pass this as --bootstrap-peer
+            // so every node uses the local relay, never the public one.
+            "W3WALLET_BOOTSTRAP_PEER" to relayMultiaddr,
             // Put our Node install first on PATH so playwright shells launched
             // by the spec (e.g. testP2pReconnectAfterDaemonRestart's
             // `java -cp $DAEMON_CLASSPATH ...`) see a consistent env.
