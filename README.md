@@ -1,5 +1,7 @@
 # W3WalletBrowserTestHarness
 
+Part of the [W3Wallet](https://github.com/CodexCoder21Organization/DocumentationRepository/blob/main/projects/W3Wallet.md) project.
+
 Kotlin test harness for the W3Wallet browser-extension Playwright suite.
 
 ## What it does
@@ -34,6 +36,10 @@ A single call to `BrowserSpecRunner.runSpec` handles:
 9. Deterministic tear-down of daemon + demo.
 
 Runs identically on the `kotlin.build (remote)` droplet and on a GitHub Actions runner — the only prereqs are Node 20, `git`, and a JDK.
+
+## Running inside a NetLab topology (planned)
+
+Today `runSpec` starts the daemon, demo, and Playwright on the **local machine**, so the browser reaches the daemon over loopback. A planned `NETLAB_ENABLED` mode will instead stand up a [NetLab](https://github.com/CodexCoder21Organization/DocumentationRepository/blob/main/projects/NetLab.md) topology and run the spec *inside* a NAT'd browser-host container via the service's `exec()`, exercising the cross-NAT capability flow end to end (browser + extension + daemon behind a NAT, talking to a public host running the web app — in JavaScript-demo and Java-backend-demo variants). It depends on a browser-host image and a NetLab artifact-retrieval method to pull Playwright failure traces back out; see the [NetLab workstream](https://github.com/CodexCoder21Organization/PlanRepository/blob/main/workstreams/NetLab.md).
 
 ## Why a separate repo
 
