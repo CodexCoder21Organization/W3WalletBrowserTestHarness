@@ -438,10 +438,9 @@ object BrowserSpecRunner {
         )
         if (onPath.exitCode == 0) {
             val nodeBin = File(onPath.stdout.trim().lines().first()).parentFile
-            // Playwright 1.48 requires Node 18+. Ubuntu 22.04 ships Node 12 at
-            // /usr/bin/node; running `npx playwright install chromium` with
-            // Node 12 exits 127 (the script can't parse modern syntax). Only
-            // accept system Node if the major version is ≥ 18.
+            // The vendored TypeScript harness declares `node >=20`. Accepting
+            // Node 18 lets npm fail later during package installation, so only
+            // accept a system install when it satisfies the harness contract.
             val versionResult = runCommand(
                 listOf(File(nodeBin, "node").absolutePath, "--version"),
                 cwd = File("."),
@@ -449,7 +448,7 @@ object BrowserSpecRunner {
                 failOnNonZero = false,
             )
             val major = Regex("""v(\d+)""").find(versionResult.stdout.trim())?.groupValues?.get(1)?.toIntOrNull()
-            if (major != null && major >= 18) {
+            if (major != null && major >= 20) {
                 println("[harness] Using system Node ${versionResult.stdout.trim()} from ${nodeBin.absolutePath}")
                 return nodeBin.absolutePath
             }
@@ -512,20 +511,13 @@ object BrowserSpecRunner {
         } else {
             println("[harness] Reusing cached node_modules")
         }
-        val playwrightCache = File(System.getProperty("user.home"), ".cache/ms-playwright")
-        val chromiumInstalled = playwrightCache.isDirectory &&
-            (playwrightCache.listFiles()?.any { it.name.startsWith("chromium-") } == true)
-        if (chromiumInstalled) {
-            println("[harness] Reusing cached Playwright Chromium")
-        } else {
-            println("[harness] Installing Playwright Chromium")
-            runCommand(
-                listOf("$nodeBin/npx", "playwright", "install", "chromium"),
-                cwd = repoRoot,
-                extraEnv = pathEnv,
-                timeoutSeconds = 600,
-            )
-        }
+        println("[harness] Ensuring Playwright Chromium matches the resolved npm package")
+        runCommand(
+            listOf("$nodeBin/npx", "playwright", "install", "chromium"),
+            cwd = repoRoot,
+            extraEnv = pathEnv,
+            timeoutSeconds = 600,
+        )
     }
 
     // ---- Daemon / demo lifecycle -------------------------------------------
